@@ -19,4 +19,7 @@ mod types;
 pub use client::RedisClient;
 pub use connection::RedisConnection;
 pub use json_connection::RedisJsonConnection;
-pub use types::{RedisValueType, RedisExpireOption, RedisExpireResult, RedisClientConfig};
+pub use types::{
+    RedisValueType, RedisExpireOption, RedisExpireResult,
+    RedisClientConfig, DatabaseStats, RedisInfo
+};

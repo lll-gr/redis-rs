@@ -970,13 +970,16 @@ impl RedisConnection {
             .map_err(|e| napi_ohos::Error::from_reason(format!("DBSIZE failed: {}", e)))
     }
 
-    /// INFO command - Get server information
+    /// INFO command - Get server information as raw string
     ///
     /// # Arguments
     /// * `section` - Optional section name (e.g., "server", "memory", "stats", "keyspace")
     ///
     /// # Returns
     /// Server information as string
+    ///
+    /// # Note
+    /// For structured data, use `getInfoParsed()` instead.
     #[napi]
     pub fn info(&mut self, section: Option<String>) -> Result<String> {
         let mut cmd = redis::cmd("INFO");
@@ -987,26 +990,126 @@ impl RedisConnection {
             .map_err(|e| napi_ohos::Error::from_reason(format!("INFO failed: {}", e)))
     }
 
+    /// Get parsed server information as structured data
+    ///
+    /// Returns a RedisInfo object with all sections as fields.
+    /// This method parses the INFO command output into a structured format.
+    ///
+    /// # Returns
+    /// RedisInfo object with optional fields for each section
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// import { RedisInfo } from 'libredis_ohos.so';
+    ///
+    /// const info = conn.getInfoParsed();
+    ///
+    /// // Access server section
+    /// if (info.server) {
+    ///   console.log("Redis version:", info.server.get("redis_version"));
+    ///   console.log("OS:", info.server.get("os"));
+    ///   console.log("Uptime (days):", info.server.get("uptime_in_days"));
+    /// }
+    ///
+    /// // Access memory section
+    /// if (info.memory) {
+    ///   console.log("Used memory:", info.memory.get("used_memory_human"));
+    ///   console.log("Peak memory:", info.memory.get("used_memory_peak_human"));
+    /// }
+    ///
+    /// // Access stats section
+    /// if (info.stats) {
+    ///   console.log("Total commands:", info.stats.get("total_commands_processed"));
+    ///   console.log("Total connections:", info.stats.get("total_connections_received"));
+    /// }
+    ///
+    /// // Access clients section
+    /// if (info.clients) {
+    ///   console.log("Connected clients:", info.clients.get("connected_clients"));
+    /// }
+    /// ```
+    #[napi]
+    pub fn get_info_parsed(&mut self) -> Result<crate::types::RedisInfo> {
+        use crate::types::RedisInfo;
+
+        // Get all INFO sections
+        let info_str: String = redis::cmd("INFO")
+            .arg("all")
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("INFO all failed: {}", e)))?;
+
+        let mut result = RedisInfo::default();
+        let mut current_section_name: Option<String> = None;
+        let mut current_data = std::collections::HashMap::new();
+
+        for line in info_str.lines() {
+            let line = line.trim();
+
+            // Skip empty lines
+            if line.is_empty() {
+                continue;
+            }
+
+            // Section header: # Section
+            if line.starts_with('#') {
+                // Save previous section if exists
+                if let Some(section_name) = current_section_name.take() {
+                    result.set_section(&section_name, current_data.clone());
+                    current_data.clear();
+                }
+
+                // Parse new section name
+                let section_name = line[1..].trim().to_string();
+                current_section_name = Some(section_name);
+                continue;
+            }
+
+            // Key-value pair: key:value
+            if let Some((key, value)) = line.split_once(':') {
+                current_data.insert(key.trim().to_string(), value.trim().to_string());
+            }
+        }
+
+        // Save last section
+        if let Some(section_name) = current_section_name {
+            result.set_section(&section_name, current_data);
+        }
+
+        Ok(result)
+    }
+
     /// Get keyspace statistics for all databases
     ///
     /// Returns information about keys count, expires, and avg_ttl for each database.
     /// This is a convenience method that calls INFO keyspace and parses the result.
     ///
     /// # Returns
-    /// JSON string containing database statistics
+    /// Map of database name to DatabaseStats object
     ///
     /// # Example (ArkTS)
     /// ```typescript
-    /// const stats = conn.getKeyspaceInfo();
-    /// console.log(stats);
-    /// // Output example:
-    /// // {
-    /// //   "db0": {"keys": 100, "expires": 10, "avg_ttl": 5000},
-    /// //   "db1": {"keys": 50, "expires": 5, "avg_ttl": 3000}
-    /// // }
+    /// import { DatabaseStats } from 'libredis_ohos.so';
+    ///
+    /// const keyspaceInfo = conn.getKeyspaceInfo();
+    ///
+    /// // Iterate through all databases
+    /// for (const [dbName, stats] of Object.entries(keyspaceInfo)) {
+    ///   console.log(`Database: ${dbName}`);
+    ///   console.log(`  Keys: ${stats.keys}`);
+    ///   console.log(`  Expires: ${stats.expires}`);
+    ///   console.log(`  Avg TTL: ${stats.avgTtl} ms`);
+    /// }
+    ///
+    /// // Access specific database
+    /// const db0Stats = keyspaceInfo["db0"];
+    /// if (db0Stats) {
+    ///   console.log(`DB0 has ${db0Stats.keys} keys`);
+    /// }
     /// ```
     #[napi]
-    pub fn get_keyspace_info(&mut self) -> Result<String> {
+    pub fn get_keyspace_info(&mut self) -> Result<std::collections::HashMap<String, crate::types::DatabaseStats>> {
+        use crate::types::DatabaseStats;
+
         let info_str: String = redis::cmd("INFO")
             .arg("keyspace")
             .query(&mut self.inner)
@@ -1018,26 +1121,38 @@ impl RedisConnection {
 
         for line in info_str.lines() {
             if line.starts_with("db") {
-                if let Some((db_name, stats)) = line.split_once(':') {
-                    let mut db_stats = std::collections::HashMap::new();
+                if let Some((db_name, stats_str)) = line.split_once(':') {
+                    let mut keys = 0i64;
+                    let mut expires = 0i64;
+                    let mut avg_ttl = 0i64;
 
-                    for stat in stats.split(',') {
+                    // Parse stats: keys=100,expires=10,avg_ttl=5000
+                    for stat in stats_str.split(',') {
                         if let Some((key, value)) = stat.split_once('=') {
                             if let Ok(num) = value.parse::<i64>() {
-                                db_stats.insert(key.to_string(), num);
+                                match key {
+                                    "keys" => keys = num,
+                                    "expires" => expires = num,
+                                    "avg_ttl" => avg_ttl = num,
+                                    _ => {}
+                                }
                             }
                         }
                     }
 
-                    result.insert(db_name.to_string(), db_stats);
+                    result.insert(
+                        db_name.to_string(),
+                        DatabaseStats {
+                            keys,
+                            expires,
+                            avg_ttl,
+                        },
+                    );
                 }
             }
         }
 
-        // Convert to JSON string
-        serde_json::to_string(&result).map_err(|e| {
-            napi_ohos::Error::from_reason(format!("Failed to serialize keyspace info: {}", e))
-        })
+        Ok(result)
     }
 
     /// Get total keys count across all databases

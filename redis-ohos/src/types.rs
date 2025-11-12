@@ -213,3 +213,126 @@ impl RedisExpireResult {
     }
 }
 
+/// Database statistics from keyspace info
+///
+/// Contains statistics for a single Redis database.
+///
+/// # Example (ArkTS)
+/// ```typescript
+/// const keyspaceInfo = conn.getKeyspaceInfo();
+/// for (const [dbName, stats] of Object.entries(keyspaceInfo)) {
+///   console.log(`Database: ${dbName}`);
+///   console.log(`  Keys: ${stats.keys}`);
+///   console.log(`  Expires: ${stats.expires}`);
+///   console.log(`  Avg TTL: ${stats.avgTtl} ms`);
+/// }
+/// ```
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct DatabaseStats {
+    /// Number of keys in the database
+    pub keys: i64,
+
+    /// Number of keys with an expiration
+    pub expires: i64,
+
+    /// Average TTL in milliseconds (0 if no keys have TTL)
+    pub avg_ttl: i64,
+}
+
+impl Default for DatabaseStats {
+    fn default() -> Self {
+        DatabaseStats {
+            keys: 0,
+            expires: 0,
+            avg_ttl: 0,
+        }
+    }
+}
+
+/// Redis INFO data structure
+///
+/// Contains all sections from the Redis INFO command as structured fields.
+/// Each field is a Map containing key-value pairs for that section.
+///
+/// # Example (ArkTS)
+/// ```typescript
+/// const info = conn.getInfoParsed();
+///
+/// // Access server section
+/// if (info.server) {
+///   console.log("Redis version:", info.server.get("redis_version"));
+///   console.log("OS:", info.server.get("os"));
+/// }
+///
+/// // Access memory section
+/// if (info.memory) {
+///   console.log("Used memory:", info.memory.get("used_memory_human"));
+/// }
+///
+/// // Access stats section
+/// if (info.stats) {
+///   console.log("Total commands:", info.stats.get("total_commands_processed"));
+/// }
+/// ```
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct RedisInfo {
+    /// Server information (version, mode, OS, etc.)
+    pub server: Option<std::collections::HashMap<String, String>>,
+
+    /// Client connections information
+    pub clients: Option<std::collections::HashMap<String, String>>,
+
+    /// Memory usage information
+    pub memory: Option<std::collections::HashMap<String, String>>,
+
+    /// Persistence (RDB/AOF) information
+    pub persistence: Option<std::collections::HashMap<String, String>>,
+
+    /// General statistics
+    pub stats: Option<std::collections::HashMap<String, String>>,
+
+    /// Replication information
+    pub replication: Option<std::collections::HashMap<String, String>>,
+
+    /// CPU usage information
+    pub cpu: Option<std::collections::HashMap<String, String>>,
+
+    /// Command statistics
+    pub commandstats: Option<std::collections::HashMap<String, String>>,
+
+    /// Cluster information
+    pub cluster: Option<std::collections::HashMap<String, String>>,
+
+    /// Keyspace statistics (per-database)
+    pub keyspace: Option<std::collections::HashMap<String, String>>,
+
+    /// Modules information
+    pub modules: Option<std::collections::HashMap<String, String>>,
+
+    /// Error statistics
+    pub errorstats: Option<std::collections::HashMap<String, String>>,
+}
+
+impl RedisInfo {
+    /// Set a section's data
+    pub fn set_section(&mut self, section_name: &str, data: std::collections::HashMap<String, String>) {
+        match section_name.to_lowercase().as_str() {
+            "server" => self.server = Some(data),
+            "clients" => self.clients = Some(data),
+            "memory" => self.memory = Some(data),
+            "persistence" => self.persistence = Some(data),
+            "stats" => self.stats = Some(data),
+            "replication" => self.replication = Some(data),
+            "cpu" => self.cpu = Some(data),
+            "commandstats" => self.commandstats = Some(data),
+            "cluster" => self.cluster = Some(data),
+            "keyspace" => self.keyspace = Some(data),
+            "modules" => self.modules = Some(data),
+            "errorstats" => self.errorstats = Some(data),
+            _ => {} // Ignore unknown sections
+        }
+    }
+}
+
