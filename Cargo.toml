@@ -5,6 +5,7 @@ members = [
   "valkey",
   "afl/parser",
   "test-macros",
+  "redis-ohos",
 ]
 resolver = "2"
 
