@@ -702,6 +702,30 @@ impl RedisConnection {
             .map_err(|e| napi_ohos::Error::from_reason(format!("PING failed: {}", e)))
     }
 
+    /// QUIT command - Close the connection gracefully
+    ///
+    /// This command asks the server to close the connection.
+    /// The connection will be closed after this command is executed.
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// const client = new RedisClient("redis://127.0.0.1:6379");
+    /// const conn = client.getConnection();
+    /// // ... use connection ...
+    /// conn.quit(); // Gracefully close the connection
+    /// ```
+    ///
+    /// # Note
+    /// After calling quit(), the connection object should not be used anymore.
+    /// The connection will be automatically closed when the object is garbage collected,
+    /// so calling quit() is optional but recommended for explicit resource management.
+    #[napi]
+    pub fn quit(&mut self) -> Result<()> {
+        redis::cmd("QUIT")
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("QUIT failed: {}", e)))
+    }
+
     /// KEYS command - Find all keys matching pattern
     ///
     /// # Arguments
