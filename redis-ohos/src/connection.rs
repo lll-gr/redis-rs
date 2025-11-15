@@ -1906,4 +1906,864 @@ impl RedisConnection {
         serde_json::to_string(&json_value)
             .map_err(|e| napi_ohos::Error::from_reason(format!("JSON serialization failed: {}", e)))
     }
+
+    // ==================== Stream Commands ====================
+
+    /// XADD command - Add a message to a stream
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `id` - The message ID (use "*" for auto-generated ID)
+    /// * `items` - Array of [field, value] pairs
+    ///
+    /// # Returns
+    /// The ID of the added message, or null if NOMKSTREAM was used and stream doesn't exist
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// // Auto-generate ID
+    /// const id = conn.xadd("mystream", "*", [["sensor", "temperature"], ["value", "23.5"]]);
+    /// console.log("Added message:", id);
+    ///
+    /// // Specific ID
+    /// const id2 = conn.xadd("mystream", "1234567890-0", [["sensor", "humidity"], ["value", "65"]]);
+    /// ```
+    #[napi]
+    pub fn xadd(&mut self, key: String, id: String, items: Vec<Vec<String>>) -> Result<Option<String>> {
+        let pairs: Vec<(String, String)> = items
+            .into_iter()
+            .filter_map(|pair| {
+                if pair.len() == 2 {
+                    Some((pair[0].clone(), pair[1].clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        redis::cmd("XADD")
+            .arg(&key)
+            .arg(&id)
+            .arg(&pairs)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XADD failed: {}", e)))
+    }
+
+    /// XLEN command - Get the number of messages in a stream
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    ///
+    /// # Returns
+    /// Number of messages in the stream
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// const length = conn.xlen("mystream");
+    /// console.log("Stream length:", length);
+    /// ```
+    #[napi]
+    pub fn xlen(&mut self, key: String) -> Result<i32> {
+        redis::cmd("XLEN")
+            .arg(&key)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XLEN failed: {}", e)))
+    }
+
+    /// XDEL command - Delete messages from a stream
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `ids` - Array of message IDs to delete
+    ///
+    /// # Returns
+    /// Number of messages deleted
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// const deleted = conn.xdel("mystream", ["1234567890-0", "1234567891-0"]);
+    /// console.log("Deleted messages:", deleted);
+    /// ```
+    #[napi]
+    pub fn xdel(&mut self, key: String, ids: Vec<String>) -> Result<i32> {
+        redis::cmd("XDEL")
+            .arg(&key)
+            .arg(&ids)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XDEL failed: {}", e)))
+    }
+
+    /// XTRIM command - Trim stream to a maximum length
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `maxlen` - Maximum number of messages to keep
+    /// * `approximate` - If true, use approximate trimming (~), otherwise exact (=)
+    ///
+    /// # Returns
+    /// Number of messages deleted
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// // Exact trim to 1000 messages
+    /// const deleted = conn.xtrim("mystream", 1000, false);
+    ///
+    /// // Approximate trim (more efficient)
+    /// const deleted2 = conn.xtrim("mystream", 1000, true);
+    /// ```
+    #[napi]
+    pub fn xtrim(&mut self, key: String, maxlen: i32, approximate: bool) -> Result<i32> {
+        let mut cmd = redis::cmd("XTRIM");
+        cmd.arg(&key).arg("MAXLEN");
+
+        if approximate {
+            cmd.arg("~");
+        } else {
+            cmd.arg("=");
+        }
+
+        cmd.arg(maxlen)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XTRIM failed: {}", e)))
+    }
+
+    /// XRANGE command - Get a range of messages from a stream
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `start` - Start ID (use "-" for the first message)
+    /// * `end` - End ID (use "+" for the last message)
+    /// * `count` - Optional maximum number of messages to return
+    ///
+    /// # Returns
+    /// JSON string containing array of messages with their IDs and fields
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// // Get all messages
+    /// const messages = conn.xrange("mystream", "-", "+", null);
+    ///
+    /// // Get first 10 messages
+    /// const first10 = conn.xrange("mystream", "-", "+", 10);
+    ///
+    /// // Get messages in a specific range
+    /// const range = conn.xrange("mystream", "1234567890-0", "1234567900-0", null);
+    /// ```
+    #[napi]
+    pub fn xrange(&mut self, key: String, start: String, end: String, count: Option<i32>) -> Result<String> {
+        let mut cmd = redis::cmd("XRANGE");
+        cmd.arg(&key).arg(&start).arg(&end);
+
+        if let Some(c) = count {
+            cmd.arg("COUNT").arg(c);
+        }
+
+        let result: Vec<(String, Vec<(String, String)>)> = cmd
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XRANGE failed: {}", e)))?;
+
+        // Convert to JSON
+        let json_result: Vec<serde_json::Value> = result
+            .into_iter()
+            .map(|(id, fields)| {
+                let mut map = serde_json::Map::new();
+                map.insert("id".to_string(), serde_json::Value::String(id));
+
+                let fields_map: serde_json::Map<String, serde_json::Value> = fields
+                    .into_iter()
+                    .map(|(k, v)| (k, serde_json::Value::String(v)))
+                    .collect();
+                map.insert("fields".to_string(), serde_json::Value::Object(fields_map));
+
+                serde_json::Value::Object(map)
+            })
+            .collect();
+
+        serde_json::to_string(&json_result)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("JSON serialization failed: {}", e)))
+    }
+
+    /// XREVRANGE command - Get a range of messages from a stream in reverse order
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `end` - End ID (use "+" for the last message)
+    /// * `start` - Start ID (use "-" for the first message)
+    /// * `count` - Optional maximum number of messages to return
+    ///
+    /// # Returns
+    /// JSON string containing array of messages with their IDs and fields (in reverse order)
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// // Get all messages in reverse order
+    /// const messages = conn.xrevrange("mystream", "+", "-", null);
+    ///
+    /// // Get last 10 messages
+    /// const last10 = conn.xrevrange("mystream", "+", "-", 10);
+    /// ```
+    #[napi]
+    pub fn xrevrange(&mut self, key: String, end: String, start: String, count: Option<i32>) -> Result<String> {
+        let mut cmd = redis::cmd("XREVRANGE");
+        cmd.arg(&key).arg(&end).arg(&start);
+
+        if let Some(c) = count {
+            cmd.arg("COUNT").arg(c);
+        }
+
+        let result: Vec<(String, Vec<(String, String)>)> = cmd
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XREVRANGE failed: {}", e)))?;
+
+        // Convert to JSON
+        let json_result: Vec<serde_json::Value> = result
+            .into_iter()
+            .map(|(id, fields)| {
+                let mut map = serde_json::Map::new();
+                map.insert("id".to_string(), serde_json::Value::String(id));
+
+                let fields_map: serde_json::Map<String, serde_json::Value> = fields
+                    .into_iter()
+                    .map(|(k, v)| (k, serde_json::Value::String(v)))
+                    .collect();
+                map.insert("fields".to_string(), serde_json::Value::Object(fields_map));
+
+                serde_json::Value::Object(map)
+            })
+            .collect();
+
+        serde_json::to_string(&json_result)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("JSON serialization failed: {}", e)))
+    }
+
+    /// XREAD command - Read messages from one or more streams
+    ///
+    /// # Arguments
+    /// * `keys` - Array of stream keys to read from
+    /// * `ids` - Array of IDs to start reading from (use "$" for new messages only)
+    /// * `count` - Optional maximum number of messages per stream
+    /// * `block` - Optional block time in milliseconds (0 for indefinite)
+    ///
+    /// # Returns
+    /// JSON string containing messages from each stream, or null if no messages
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// // Read all new messages from multiple streams
+    /// const messages = conn.xread(["stream1", "stream2"], ["0-0", "0-0"], null, null);
+    ///
+    /// // Read with count limit
+    /// const limited = conn.xread(["stream1"], ["0-0"], 10, null);
+    ///
+    /// // Block for 1 second waiting for new messages
+    /// const blocked = conn.xread(["stream1"], ["$"], null, 1000);
+    /// ```
+    #[napi]
+    pub fn xread(&mut self, keys: Vec<String>, ids: Vec<String>, count: Option<i32>, block: Option<i32>) -> Result<Option<String>> {
+        if keys.len() != ids.len() {
+            return Err(napi_ohos::Error::from_reason("keys and ids must have the same length"));
+        }
+
+        let mut cmd = redis::cmd("XREAD");
+
+        if let Some(c) = count {
+            cmd.arg("COUNT").arg(c);
+        }
+
+        if let Some(b) = block {
+            cmd.arg("BLOCK").arg(b);
+        }
+
+        cmd.arg("STREAMS");
+        for key in &keys {
+            cmd.arg(key);
+        }
+        for id in &ids {
+            cmd.arg(id);
+        }
+
+        let result: Option<Vec<(String, Vec<(String, Vec<(String, String)>)>)>> = cmd
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XREAD failed: {}", e)))?;
+
+        match result {
+            None => Ok(None),
+            Some(streams) => {
+                // Convert to JSON
+                let json_result: Vec<serde_json::Value> = streams
+                    .into_iter()
+                    .map(|(stream_key, messages)| {
+                        let mut stream_map = serde_json::Map::new();
+                        stream_map.insert("stream".to_string(), serde_json::Value::String(stream_key));
+
+                        let messages_json: Vec<serde_json::Value> = messages
+                            .into_iter()
+                            .map(|(id, fields)| {
+                                let mut msg_map = serde_json::Map::new();
+                                msg_map.insert("id".to_string(), serde_json::Value::String(id));
+
+                                let fields_map: serde_json::Map<String, serde_json::Value> = fields
+                                    .into_iter()
+                                    .map(|(k, v)| (k, serde_json::Value::String(v)))
+                                    .collect();
+                                msg_map.insert("fields".to_string(), serde_json::Value::Object(fields_map));
+
+                                serde_json::Value::Object(msg_map)
+                            })
+                            .collect();
+
+                        stream_map.insert("messages".to_string(), serde_json::Value::Array(messages_json));
+                        serde_json::Value::Object(stream_map)
+                    })
+                    .collect();
+
+                serde_json::to_string(&json_result)
+                    .map(Some)
+                    .map_err(|e| napi_ohos::Error::from_reason(format!("JSON serialization failed: {}", e)))
+            }
+        }
+    }
+
+    /// XGROUP CREATE command - Create a consumer group
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `group` - The consumer group name
+    /// * `id` - The ID to start reading from (use "$" for new messages, "0" for all messages)
+    /// * `mkstream` - If true, create the stream if it doesn't exist
+    ///
+    /// # Returns
+    /// Unit on success
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// // Create group starting from beginning
+    /// conn.xgroupCreate("mystream", "mygroup", "0", false);
+    ///
+    /// // Create group for new messages only, create stream if needed
+    /// conn.xgroupCreate("mystream", "mygroup", "$", true);
+    /// ```
+    #[napi]
+    pub fn xgroup_create(&mut self, key: String, group: String, id: String, mkstream: bool) -> Result<()> {
+        let mut cmd = redis::cmd("XGROUP");
+        cmd.arg("CREATE").arg(&key).arg(&group).arg(&id);
+
+        if mkstream {
+            cmd.arg("MKSTREAM");
+        }
+
+        cmd.query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XGROUP CREATE failed: {}", e)))
+    }
+
+    /// XGROUP DESTROY command - Destroy a consumer group
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `group` - The consumer group name
+    ///
+    /// # Returns
+    /// true if group was destroyed, false if it didn't exist
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// const destroyed = conn.xgroupDestroy("mystream", "mygroup");
+    /// ```
+    #[napi]
+    pub fn xgroup_destroy(&mut self, key: String, group: String) -> Result<bool> {
+        redis::cmd("XGROUP")
+            .arg("DESTROY")
+            .arg(&key)
+            .arg(&group)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XGROUP DESTROY failed: {}", e)))
+    }
+
+    /// XGROUP SETID command - Set the consumer group's last delivered ID
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `group` - The consumer group name
+    /// * `id` - The new last delivered ID
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// conn.xgroupSetid("mystream", "mygroup", "$");
+    /// ```
+    #[napi]
+    pub fn xgroup_setid(&mut self, key: String, group: String, id: String) -> Result<()> {
+        redis::cmd("XGROUP")
+            .arg("SETID")
+            .arg(&key)
+            .arg(&group)
+            .arg(&id)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XGROUP SETID failed: {}", e)))
+    }
+
+    /// XGROUP DELCONSUMER command - Delete a consumer from a consumer group
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `group` - The consumer group name
+    /// * `consumer` - The consumer name
+    ///
+    /// # Returns
+    /// Number of pending messages the consumer had
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// const pending = conn.xgroupDelconsumer("mystream", "mygroup", "consumer1");
+    /// ```
+    #[napi]
+    pub fn xgroup_delconsumer(&mut self, key: String, group: String, consumer: String) -> Result<i32> {
+        redis::cmd("XGROUP")
+            .arg("DELCONSUMER")
+            .arg(&key)
+            .arg(&group)
+            .arg(&consumer)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XGROUP DELCONSUMER failed: {}", e)))
+    }
+
+    /// XREADGROUP command - Read messages from a stream as a consumer group member
+    ///
+    /// # Arguments
+    /// * `group` - The consumer group name
+    /// * `consumer` - The consumer name
+    /// * `keys` - Array of stream keys to read from
+    /// * `ids` - Array of IDs to start reading from (use ">" for undelivered messages)
+    /// * `count` - Optional maximum number of messages per stream
+    /// * `block` - Optional block time in milliseconds (0 for indefinite)
+    ///
+    /// # Returns
+    /// JSON string containing messages from each stream, or null if no messages
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// // Read undelivered messages
+    /// const messages = conn.xreadgroup("mygroup", "consumer1", ["stream1"], [">"], null, null);
+    ///
+    /// // Read with count and blocking
+    /// const limited = conn.xreadgroup("mygroup", "consumer1", ["stream1"], [">"], 10, 1000);
+    /// ```
+    #[napi]
+    pub fn xreadgroup(&mut self, group: String, consumer: String, keys: Vec<String>, ids: Vec<String>, count: Option<i32>, block: Option<i32>) -> Result<Option<String>> {
+        if keys.len() != ids.len() {
+            return Err(napi_ohos::Error::from_reason("keys and ids must have the same length"));
+        }
+
+        let mut cmd = redis::cmd("XREADGROUP");
+        cmd.arg("GROUP").arg(&group).arg(&consumer);
+
+        if let Some(c) = count {
+            cmd.arg("COUNT").arg(c);
+        }
+
+        if let Some(b) = block {
+            cmd.arg("BLOCK").arg(b);
+        }
+
+        cmd.arg("STREAMS");
+        for key in &keys {
+            cmd.arg(key);
+        }
+        for id in &ids {
+            cmd.arg(id);
+        }
+
+        let result: Option<Vec<(String, Vec<(String, Vec<(String, String)>)>)>> = cmd
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XREADGROUP failed: {}", e)))?;
+
+        match result {
+            None => Ok(None),
+            Some(streams) => {
+                // Convert to JSON (same format as XREAD)
+                let json_result: Vec<serde_json::Value> = streams
+                    .into_iter()
+                    .map(|(stream_key, messages)| {
+                        let mut stream_map = serde_json::Map::new();
+                        stream_map.insert("stream".to_string(), serde_json::Value::String(stream_key));
+
+                        let messages_json: Vec<serde_json::Value> = messages
+                            .into_iter()
+                            .map(|(id, fields)| {
+                                let mut msg_map = serde_json::Map::new();
+                                msg_map.insert("id".to_string(), serde_json::Value::String(id));
+
+                                let fields_map: serde_json::Map<String, serde_json::Value> = fields
+                                    .into_iter()
+                                    .map(|(k, v)| (k, serde_json::Value::String(v)))
+                                    .collect();
+                                msg_map.insert("fields".to_string(), serde_json::Value::Object(fields_map));
+
+                                serde_json::Value::Object(msg_map)
+                            })
+                            .collect();
+
+                        stream_map.insert("messages".to_string(), serde_json::Value::Array(messages_json));
+                        serde_json::Value::Object(stream_map)
+                    })
+                    .collect();
+
+                serde_json::to_string(&json_result)
+                    .map(Some)
+                    .map_err(|e| napi_ohos::Error::from_reason(format!("JSON serialization failed: {}", e)))
+            }
+        }
+    }
+
+    /// XACK command - Acknowledge messages in a consumer group
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `group` - The consumer group name
+    /// * `ids` - Array of message IDs to acknowledge
+    ///
+    /// # Returns
+    /// Number of messages acknowledged
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// const acked = conn.xack("mystream", "mygroup", ["1234567890-0", "1234567891-0"]);
+    /// console.log("Acknowledged messages:", acked);
+    /// ```
+    #[napi]
+    pub fn xack(&mut self, key: String, group: String, ids: Vec<String>) -> Result<i32> {
+        redis::cmd("XACK")
+            .arg(&key)
+            .arg(&group)
+            .arg(&ids)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XACK failed: {}", e)))
+    }
+
+    /// XPENDING command - Get information about pending messages in a consumer group
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `group` - The consumer group name
+    /// * `start` - Optional start ID for detailed pending info (use "-" for first)
+    /// * `end` - Optional end ID for detailed pending info (use "+" for last)
+    /// * `count` - Optional maximum number of pending messages to return
+    /// * `consumer` - Optional consumer name to filter by
+    ///
+    /// # Returns
+    /// JSON string with pending message information
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// // Get summary of pending messages
+    /// const summary = conn.xpending("mystream", "mygroup", null, null, null, null);
+    ///
+    /// // Get detailed pending info
+    /// const detailed = conn.xpending("mystream", "mygroup", "-", "+", 10, null);
+    ///
+    /// // Get pending for specific consumer
+    /// const consumerPending = conn.xpending("mystream", "mygroup", "-", "+", 10, "consumer1");
+    /// ```
+    #[napi]
+    pub fn xpending(&mut self, key: String, group: String, start: Option<String>, end: Option<String>, count: Option<i32>, consumer: Option<String>) -> Result<String> {
+        let mut cmd = redis::cmd("XPENDING");
+        cmd.arg(&key).arg(&group);
+
+        // If start/end/count are provided, get detailed info
+        if let (Some(s), Some(e), Some(c)) = (&start, &end, &count) {
+            cmd.arg(s).arg(e).arg(c);
+
+            if let Some(cons) = &consumer {
+                cmd.arg(cons);
+            }
+
+            // Detailed format: array of [id, consumer, idle_time, delivery_count]
+            let result: Vec<(String, String, i64, i64)> = cmd
+                .query(&mut self.inner)
+                .map_err(|e| napi_ohos::Error::from_reason(format!("XPENDING failed: {}", e)))?;
+
+            let json_result: Vec<serde_json::Value> = result
+                .into_iter()
+                .map(|(id, consumer, idle, deliveries)| {
+                    let mut map = serde_json::Map::new();
+                    map.insert("id".to_string(), serde_json::Value::String(id));
+                    map.insert("consumer".to_string(), serde_json::Value::String(consumer));
+                    map.insert("idleTime".to_string(), serde_json::Value::Number(idle.into()));
+                    map.insert("deliveryCount".to_string(), serde_json::Value::Number(deliveries.into()));
+                    serde_json::Value::Object(map)
+                })
+                .collect();
+
+            serde_json::to_string(&json_result)
+                .map_err(|e| napi_ohos::Error::from_reason(format!("JSON serialization failed: {}", e)))
+        } else {
+            // Summary format: [count, min_id, max_id, consumers]
+            let result: (i64, Option<String>, Option<String>, Vec<(String, i64)>) = cmd
+                .query(&mut self.inner)
+                .map_err(|e| napi_ohos::Error::from_reason(format!("XPENDING failed: {}", e)))?;
+
+            let mut map = serde_json::Map::new();
+            map.insert("count".to_string(), serde_json::Value::Number(result.0.into()));
+
+            if let Some(min_id) = result.1 {
+                map.insert("minId".to_string(), serde_json::Value::String(min_id));
+            }
+
+            if let Some(max_id) = result.2 {
+                map.insert("maxId".to_string(), serde_json::Value::String(max_id));
+            }
+
+            let consumers: Vec<serde_json::Value> = result.3
+                .into_iter()
+                .map(|(name, count)| {
+                    let mut consumer_map = serde_json::Map::new();
+                    consumer_map.insert("name".to_string(), serde_json::Value::String(name));
+                    consumer_map.insert("count".to_string(), serde_json::Value::Number(count.into()));
+                    serde_json::Value::Object(consumer_map)
+                })
+                .collect();
+
+            map.insert("consumers".to_string(), serde_json::Value::Array(consumers));
+
+            serde_json::to_string(&serde_json::Value::Object(map))
+                .map_err(|e| napi_ohos::Error::from_reason(format!("JSON serialization failed: {}", e)))
+        }
+    }
+
+    /// XCLAIM command - Claim pending messages from another consumer
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `group` - The consumer group name
+    /// * `consumer` - The consumer name claiming the messages
+    /// * `min_idle_time` - Minimum idle time in milliseconds
+    /// * `ids` - Array of message IDs to claim
+    ///
+    /// # Returns
+    /// JSON string containing claimed messages
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// // Claim messages idle for more than 60 seconds
+    /// const claimed = conn.xclaim("mystream", "mygroup", "consumer2", 60000, ["1234567890-0"]);
+    /// ```
+    #[napi]
+    pub fn xclaim(&mut self, key: String, group: String, consumer: String, min_idle_time: i64, ids: Vec<String>) -> Result<String> {
+        let result: Vec<(String, Vec<(String, String)>)> = redis::cmd("XCLAIM")
+            .arg(&key)
+            .arg(&group)
+            .arg(&consumer)
+            .arg(min_idle_time)
+            .arg(&ids)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XCLAIM failed: {}", e)))?;
+
+        // Convert to JSON (same format as XRANGE)
+        let json_result: Vec<serde_json::Value> = result
+            .into_iter()
+            .map(|(id, fields)| {
+                let mut map = serde_json::Map::new();
+                map.insert("id".to_string(), serde_json::Value::String(id));
+
+                let fields_map: serde_json::Map<String, serde_json::Value> = fields
+                    .into_iter()
+                    .map(|(k, v)| (k, serde_json::Value::String(v)))
+                    .collect();
+                map.insert("fields".to_string(), serde_json::Value::Object(fields_map));
+
+                serde_json::Value::Object(map)
+            })
+            .collect();
+
+        serde_json::to_string(&json_result)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("JSON serialization failed: {}", e)))
+    }
+
+    /// XINFO STREAM command - Get information about a stream
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    ///
+    /// # Returns
+    /// JSON string with stream information (length, first/last entry, consumer groups, etc.)
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// const info = conn.xinfoStream("mystream");
+    /// console.log("Stream info:", info);
+    /// ```
+    #[napi]
+    pub fn xinfo_stream(&mut self, key: String) -> Result<String> {
+        // XINFO STREAM returns a complex nested structure
+        // We'll use the raw Value type and convert to JSON
+        let result: redis::Value = redis::cmd("XINFO")
+            .arg("STREAM")
+            .arg(&key)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XINFO STREAM failed: {}", e)))?;
+
+        self.redis_value_to_json(&result)
+    }
+
+    /// XINFO GROUPS command - Get information about consumer groups for a stream
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    ///
+    /// # Returns
+    /// JSON string with array of consumer group information
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// const groups = conn.xinfoGroups("mystream");
+    /// console.log("Consumer groups:", groups);
+    /// ```
+    #[napi]
+    pub fn xinfo_groups(&mut self, key: String) -> Result<String> {
+        let result: redis::Value = redis::cmd("XINFO")
+            .arg("GROUPS")
+            .arg(&key)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XINFO GROUPS failed: {}", e)))?;
+
+        self.redis_value_to_json(&result)
+    }
+
+    /// XINFO CONSUMERS command - Get information about consumers in a consumer group
+    ///
+    /// # Arguments
+    /// * `key` - The stream key
+    /// * `group` - The consumer group name
+    ///
+    /// # Returns
+    /// JSON string with array of consumer information
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// const consumers = conn.xinfoConsumers("mystream", "mygroup");
+    /// console.log("Consumers:", consumers);
+    /// ```
+    #[napi]
+    pub fn xinfo_consumers(&mut self, key: String, group: String) -> Result<String> {
+        let result: redis::Value = redis::cmd("XINFO")
+            .arg("CONSUMERS")
+            .arg(&key)
+            .arg(&group)
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("XINFO CONSUMERS failed: {}", e)))?;
+
+        self.redis_value_to_json(&result)
+    }
+
+    // ==================== Generic Command Interface ====================
+
+    /// Execute a raw Redis command
+    ///
+    /// This is a generic interface that allows executing any Redis command
+    /// by providing the command name and arguments as an array of strings.
+    ///
+    /// # Arguments
+    /// * `command` - The Redis command name (e.g., "GET", "SET", "HGETALL")
+    /// * `args` - Array of command arguments
+    ///
+    /// # Returns
+    /// JSON string representation of the Redis response
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// // Simple GET command
+    /// const result = conn.cmd("GET", ["mykey"]);
+    /// console.log("Result:", result);
+    ///
+    /// // SET command
+    /// const setResult = conn.cmd("SET", ["mykey", "myvalue"]);
+    ///
+    /// // HGETALL command
+    /// const hashData = conn.cmd("HGETALL", ["myhash"]);
+    ///
+    /// // ZADD command
+    /// const zaddResult = conn.cmd("ZADD", ["myzset", "100", "member1", "200", "member2"]);
+    ///
+    /// // Complex command with multiple arguments
+    /// const xaddResult = conn.cmd("XADD", ["mystream", "*", "field1", "value1", "field2", "value2"]);
+    ///
+    /// // XRANGE command
+    /// const xrangeResult = conn.cmd("XRANGE", ["mystream", "-", "+", "COUNT", "10"]);
+    /// ```
+    ///
+    /// # Note
+    /// - The response is automatically converted to JSON format
+    /// - For simple values (strings, integers), the JSON will be a simple value
+    /// - For complex values (arrays, hashes), the JSON will be a structured object
+    /// - This is useful for executing commands not yet wrapped by specific methods
+    /// - Use specific methods when available for better type safety
+    #[napi]
+    pub fn cmd(&mut self, command: String, args: Vec<String>) -> Result<String> {
+        let mut cmd = redis::cmd(&command);
+
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        let result: redis::Value = cmd
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("CMD {} failed: {}", command, e)))?;
+
+        self.redis_value_to_json(&result)
+    }
+
+    /// Execute a raw Redis command and return raw string response
+    ///
+    /// Similar to `cmd()` but returns the raw string response without JSON conversion.
+    /// This is useful when you need the exact Redis response format.
+    ///
+    /// # Arguments
+    /// * `command` - The Redis command name
+    /// * `args` - Array of command arguments
+    ///
+    /// # Returns
+    /// Raw string response from Redis
+    ///
+    /// # Example (ArkTS)
+    /// ```typescript
+    /// // Get raw response
+    /// const raw = conn.cmdRaw("GET", ["mykey"]);
+    /// console.log("Raw response:", raw);
+    ///
+    /// // INFO command returns formatted text
+    /// const info = conn.cmdRaw("INFO", ["server"]);
+    /// console.log(info);
+    /// ```
+    ///
+    /// # Note
+    /// - This method attempts to convert the response to a string
+    /// - For complex data types, the string representation may not be ideal
+    /// - Use `cmd()` for better structured data handling
+    #[napi]
+    pub fn cmd_raw(&mut self, command: String, args: Vec<String>) -> Result<String> {
+        let mut cmd = redis::cmd(&command);
+
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        let result: redis::Value = cmd
+            .query(&mut self.inner)
+            .map_err(|e| napi_ohos::Error::from_reason(format!("CMD {} failed: {}", command, e)))?;
+
+        // Try to convert to string representation
+        match result {
+            redis::Value::BulkString(bytes) => {
+                String::from_utf8(bytes)
+                    .map_err(|e| napi_ohos::Error::from_reason(format!("UTF-8 conversion failed: {}", e)))
+            }
+            redis::Value::SimpleString(s) => Ok(s),
+            redis::Value::Int(i) => Ok(i.to_string()),
+            redis::Value::Okay => Ok("OK".to_string()),
+            redis::Value::Nil => Ok("".to_string()),
+            _ => {
+                // For complex types, fall back to JSON representation
+                self.redis_value_to_json(&result)
+            }
+        }
+    }
 }
